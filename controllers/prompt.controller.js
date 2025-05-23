@@ -3,7 +3,8 @@ import { Prompt } from "../model/prompt.model.js";
 
 const openai = new OpenAI({
   baseURL: "https://openrouter.ai/api/v1",
-  apiKey: process.env.OPEN_API_KEY,
+  apiKey:
+    "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",
 });
 console.log(openai.apiKey);
 
