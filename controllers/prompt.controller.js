@@ -1,61 +1,114 @@
-import OpenAI from "openai";
+import axios from "axios";
 import { Prompt } from "../model/prompt.model.js";
 
-const openai = new OpenAI({
-  baseURL: "https://openrouter.ai/api/v1",
-  apiKey:
-    "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",
-});
-console.log(openai.apiKey);
+const createOpenRouterRequest = (model, content, openRouterApiKey) =>
+  axios.post(
+    "https://openrouter.ai/api/v1/chat/completions",
+    {
+      model,
+      messages: [{ role: "user", content }],
+      max_tokens: 1000,
+    },
+    {
+      headers: {
+        Authorization: `Bearer ${openRouterApiKey}`,
+        "Content-Type": "application/json",
+        "HTTP-Referer": process.env.FRONTEND_URL || "http://localhost:5173",
+        "X-Title": "deepseek-ai",
+      },
+      timeout: 30000,
+    }
+  );
 
 export const sendprompt = async (req, res) => {
-    const { content } = req.body;
-    const userId = req.userId;
+  const { content } = req.body;
+  const userId = req.userId;
+  const openRouterApiKey =
+    process.env.OPENROUTER_API_KEY || process.env.OPEN_API_KEY;
+  const openRouterModel =
+    process.env.OPENROUTER_MODEL || "openrouter/free";
+  const fallbackModel = process.env.OPENROUTER_FALLBACK_MODEL || "openrouter/free";
 
-  if (!content || content.trim() === "")
-    return res.status(400).json({ errors: "prompt content is required" });
+  if (!content || content.trim() === "") {
+    return res.status(400).json({ error: "Prompt content is required" });
+  }
+
+  if (!openRouterApiKey) {
+    return res.status(500).json({
+      error: "OpenRouter API key is missing in backend environment variables",
+    });
+  }
+
   try {
-    // save user prompt
-      const userPrompt = await Prompt.create({
-        userId,
+    // Save the user's message to the database
+    await Prompt.create({
+      userId,
       role: "user",
       content,
     });
-    // send to deepseek model via Openrouter
-    const completion = await openai.chat.completions.create({
-      model: "openai/gpt-4o",
-      messages: [{ role: "user", content }],
-      max_tokens: 1000,
-    });
 
-    //   debug log to inspect full response
-    console.log("ai completion response:", completion);
+    // Send prompt to OpenRouter
+    let response;
 
-    if (
-      !completion ||
-      !completion.choices ||
-      !completion.choices[0] ||
-      !completion.choices[0].message
-    ) {
-      throw new Error("AI response is incomplete or invalid");
+    try {
+      response = await createOpenRouterRequest(
+        openRouterModel,
+        content,
+        openRouterApiKey
+      );
+    } catch (error) {
+      const providerMessage = error.response?.data?.error?.message || "";
+      const shouldFallback =
+        fallbackModel &&
+        fallbackModel !== openRouterModel &&
+        error.response?.status === 404 &&
+        providerMessage.toLowerCase().includes("no endpoints found");
+
+      if (!shouldFallback) {
+        throw error;
+      }
+
+      console.warn(
+        `Primary model ${openRouterModel} unavailable. Retrying with ${fallbackModel}.`
+      );
+
+      response = await createOpenRouterRequest(
+        fallbackModel,
+        content,
+        openRouterApiKey
+      );
     }
 
-    const aiContent = completion.choices[0].message.content;
+    // Extract AI reply
+    const aiContent = response.data?.choices?.[0]?.message?.content;
 
-    // save assistant prompt or save ai response
-      const aiMessage = await Prompt.create({
-        userId,
+    if (!aiContent) {
+      console.error("Unexpected OpenRouter response:", response.data);
+      return res.status(502).json({
+        error: "OpenRouter returned an unexpected response format",
+      });
+    }
+
+    // Save the assistant's response
+    await Prompt.create({
+      userId,
       role: "assistant",
       content: aiContent,
     });
+
+    // Return the reply
     return res.status(200).json({ reply: aiContent });
   } catch (error) {
-    console.log(
-      "error in prompt:",
-      error.response?.data || error.message || error
-    );
+    const statusCode = error.response?.status || 500;
+    const errorDetails = error.response?.data || { message: error.message };
+
+    console.error("Error from OpenRouter:", errorDetails);
+
     return res
-      .status(500)
-      .json({ error: "Something went wrong with the ai response" });
+      .status(statusCode >= 400 && statusCode < 600 ? statusCode : 500)
+      .json({
+        error: "Something went wrong with the AI response",
+        details: errorDetails,
+      });
   }
 };
